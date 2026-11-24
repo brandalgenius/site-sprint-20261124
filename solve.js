@@ -193,8 +193,41 @@ function headingOf(line) {
   return m === null || m[2] === '' ? null : { depth: m[1].length, text: m[2] };
 }
 
+function isBlank(line) {
+  for (let i = 0; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
+
+function trimLine(s) {
+  let a = 0;
+  let b = s.length;
+  while (a < b) {
+    const c = s.charCodeAt(a);
+    if (c === 32 || c === 9) a++;
+    else break;
+  }
+  while (b > a) {
+    const c = s.charCodeAt(b - 1);
+    if (c === 32 || c === 9) b--;
+    else break;
+  }
+  return a === 0 && b === s.length ? s : s.slice(a, b);
+}
+
 function endsParagraph(line) {
-  return BLANK.test(line) || FENCE_OPEN.test(line) || headingOf(line) !== null || HR.test(line);
+  if (isBlank(line)) return true;
+  const c0 = line.charCodeAt(0);
+  if (c0 === 96) return FENCE_OPEN.test(line); // `
+  if (c0 === 35) return headingOf(line) !== null; // #
+  if (c0 === 45 || c0 === 42) return HR.test(line); // - *
+  return false;
+}
+
+function isFenceClose(line) {
+  return line.charCodeAt(0) === 96 && FENCE_CLOSE.test(line);
 }
 
 function lex(src) {
@@ -203,38 +236,43 @@ function lex(src) {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    if (BLANK.test(line)) {
+    if (isBlank(line)) {
       i++;
       continue;
     }
-    const fence = FENCE_OPEN.exec(line);
-    if (fence !== null) {
-      const body = [];
-      i++;
-      while (i < lines.length && !FENCE_CLOSE.test(lines[i])) body.push(lines[i++]);
-      i++;
-      tokens.push({ type: 'code', lang: fence[1], lines: body });
-      continue;
+    const c0 = line.charCodeAt(0);
+    if (c0 === 96) {
+      const fence = FENCE_OPEN.exec(line);
+      if (fence !== null) {
+        const body = [];
+        i++;
+        while (i < lines.length && !isFenceClose(lines[i])) body.push(lines[i++]);
+        i++;
+        tokens.push({ type: 'code', lang: fence[1], lines: body });
+        continue;
+      }
     }
-    const heading = headingOf(line);
-    if (heading !== null) {
-      tokens.push({ type: 'heading', depth: heading.depth, text: heading.text });
-      i++;
-      continue;
+    if (c0 === 35) {
+      const heading = headingOf(line);
+      if (heading !== null) {
+        tokens.push({ type: 'heading', depth: heading.depth, text: heading.text });
+        i++;
+        continue;
+      }
     }
-    if (HR.test(line)) {
+    if ((c0 === 45 || c0 === 42) && HR.test(line)) {
       tokens.push({ type: 'hr' });
       i++;
       continue;
     }
-    if (QUOTE.test(line)) {
+    if (c0 === 62) {
       const body = [];
-      while (i < lines.length && QUOTE.test(lines[i])) body.push(lines[i++].replace(QUOTE_MARK, '').replace(TRIM, ''));
+      while (i < lines.length && QUOTE.test(lines[i])) body.push(trimLine(lines[i++].replace(QUOTE_MARK, '')));
       tokens.push({ type: 'blockquote', lines: body.filter((l) => l !== '') });
       continue;
     }
-    const bullet = BULLET.exec(line);
-    const ordered = bullet === null ? ORDERED.exec(line) : null;
+    const bullet = c0 === 45 || c0 === 42 ? BULLET.exec(line) : null;
+    const ordered = bullet === null && c0 >= 48 && c0 <= 57 ? ORDERED.exec(line) : null;
     if (bullet !== null || ordered !== null) {
       const isOrdered = ordered !== null;
       const marker = isOrdered ? ORDERED : BULLET;
@@ -242,30 +280,33 @@ function lex(src) {
       while (i < lines.length) {
         const m = marker.exec(lines[i]);
         if (m !== null) {
-          items.push([(isOrdered ? m[2] : m[1]).replace(TRIM, '')]);
+          items.push([trimLine(isOrdered ? m[2] : m[1])]);
           i++;
         } else if (CONTINUED.test(lines[i])) {
-          items[items.length - 1].push(lines[i].replace(TRIM, ''));
+          items[items.length - 1].push(trimLine(lines[i]));
           i++;
         } else break;
       }
       tokens.push({ type: 'list', ordered: isOrdered, start: isOrdered ? Number(ordered[1]) : 1, items: items.map((parts) => parts.join('\n')) });
       continue;
     }
-    const body = [line.replace(TRIM, '')];
+    const body = [trimLine(line)];
     i++;
-    while (i < lines.length && !endsParagraph(lines[i])) body.push(lines[i++].replace(TRIM, ''));
+    while (i < lines.length && !endsParagraph(lines[i])) body.push(trimLine(lines[i++]));
     tokens.push({ type: 'paragraph', text: body.join('\n') });
   }
   return tokens;
 }
 
-const ESCAPABLE = new Set(['\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '>']);
+/** The characters a backslash escapes, as a 128-entry ASCII table (no Set hashing on the hot path). */
+const ESCAPABLE = new Uint8Array(128);
+for (const ch of '\\`*_[]()#+-.!>') ESCAPABLE[ch.charCodeAt(0)] = 1;
+const isEscapable = (c) => c < 128 && ESCAPABLE[c] === 1;
 
 function findUnescaped(s, what, from) {
   const last = s.length - what.length;
   for (let j = from; j <= last; j++) {
-    if (s[j] === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) {
+    if (s.charCodeAt(j) === 92 && j + 1 < s.length && isEscapable(s.charCodeAt(j + 1))) {
       j++;
       continue;
     }
@@ -277,7 +318,7 @@ function findUnescaped(s, what, from) {
 function findSingleStar(s, from) {
   for (let j = from; j < s.length; j++) {
     const c = s[j];
-    if (c === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) {
+    if (c === '\\' && j + 1 < s.length && isEscapable(s.charCodeAt(j + 1))) {
       j++;
       continue;
     }
@@ -301,7 +342,7 @@ function inline(s, env) {
   let i = 0;
   while (i < s.length) {
     const c = s[i];
-    if (c === '\\' && i + 1 < s.length && ESCAPABLE.has(s[i + 1])) {
+    if (c === '\\' && i + 1 < s.length && isEscapable(s.charCodeAt(i + 1))) {
       if (i > plain) out += escapeHtml(s.slice(plain, i));
       out += ESCAPES[s[i + 1]] ?? s[i + 1];
       i += 2;
